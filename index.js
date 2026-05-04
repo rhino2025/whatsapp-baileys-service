@@ -13,7 +13,7 @@ async function connectToWhatsApp() {
     if (!sock.authState.creds.registered) {
         // Replace this with your actual WhatsApp Business number (including country code)
         // Example: '447123456789'
-        const phoneNumber = 'YOUR_PHONE_NUMBER_HERE'; 
+        const phoneNumber = '905431436966'; 
         const code = await sock.requestPairingCode(phoneNumber);
         console.log(`\n=============================================`);
         console.log(`YOUR PAIRING CODE: ${code}`);

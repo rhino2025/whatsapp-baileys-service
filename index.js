@@ -1,3 +1,4 @@
+console.log(">>> ENGINE STARTING - " + new Date().toISOString());
 async function connectToWhatsApp() {
     const { state, saveCreds } = await useMultiFileAuthState('auth_info_baileys');
     const { version } = await fetchLatestBaileysVersion();

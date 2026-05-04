@@ -28,10 +28,10 @@ async function connectToWhatsApp() {
         const { connection, lastDisconnect, qr } = update;
         
         if (qr) {
-            console.log('\n=============================================');
-            console.log('--- SCAN THIS QR CODE WITH YOUR PHONE ---');
-            console.log('=============================================\n');
+            console.log('\n--- SCAN BELOW ---');
+            // 'small: true' uses special block characters that scan much better on Railway
             qrcode.generate(qr, { small: true });
+            console.log('--- END QR ---\n');
         }
 
         if (connection === 'close') {

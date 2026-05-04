@@ -1,32 +1,35 @@
 console.log(">>> ENGINE STARTING - " + new Date().toISOString());
 async function connectToWhatsApp() {
+    console.log("1. Initializing Auth State...");
     const { state, saveCreds } = await useMultiFileAuthState('auth_info_baileys');
-    const { version } = await fetchLatestBaileysVersion();
 
-    sock = makeWASocket({
+    console.log("2. Starting Socket...");
+    const sock = makeWASocket({
         auth: state,
-        version,
-        browser: ["Ubuntu", "Chrome", "20.0.04"], // Required for pairing code to work
-        printQRInTerminal: false // We are switching to pairing code
+        // Using a hardcoded version to avoid the network hang
+        version: [2, 3000, 1015901307], 
+        browser: ["Ubuntu", "Chrome", "20.0.04"],
+        printQRInTerminal: false,
+        // Add these to help with connection stability
+        connectTimeoutMs: 60000,
+        defaultQueryTimeoutMs: 0,
     });
 
-    // --- ADD THIS SECTION ---
     if (!sock.authState.creds.registered) {
-        // Replace this with your actual WhatsApp Business number (including country code)
-        // Example: '447123456789'
-        const phoneNumber = '905431436966'; 
-        const code = await sock.requestPairingCode(phoneNumber);
-        console.log(`\n=============================================`);
-        console.log(`YOUR PAIRING CODE: ${code}`);
-        console.log(`=============================================\n`);
+        const phoneNumber = '905431436966'; // DOUBLE CHECK THIS IS A STRING
+        console.log(`3. Requesting Pairing Code for: ${phoneNumber}`);
+        
+        // Try requesting it immediately without the timeout first
+        try {
+            const code = await sock.requestPairingCode(phoneNumber);
+            console.log(`\n=============================================`);
+            console.log(`PAIRING CODE: ${code}`);
+            console.log(`=============================================\n`);
+        } catch (err) {
+            console.log("Pairing Error:", err.message);
+        }
     }
-    // ------------------------
 
     sock.ev.on('creds.update', saveCreds);
-    
-    sock.ev.on('connection.update', (update) => {
-        const { connection, lastDisconnect } = update;
-        if (connection === 'open') console.log('CONNECTED TO WHATSAPP');
-        // ... rest of your existing connection update logic
-    });
+    // ... rest of your code
 }

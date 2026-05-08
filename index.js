@@ -1,96 +1,129 @@
-const { 
-    default: makeWASocket, 
-    useMultiFileAuthState, 
-    DisconnectReason 
+const {
+    default: makeWASocket,
+    useMultiFileAuthState,
+    DisconnectReason,
+    fetchLatestBaileysVersion
 } = require('@whiskeysockets/baileys');
 const express = require('express');
 const pino = require('pino');
 
 // 1. Global Error Handling
-process.on('uncaughtException', (err) => {
-    console.error('!!! CRITICAL ERROR:', err.message);
-});
+process.on('uncaughtException', (err) => console.error('UNCAUGHT EXCEPTION:', err));
+process.on('unhandledRejection', (err) => console.error('UNHANDLED REJECTION:', err));
 
 const app = express();
 app.use(express.json());
 
 const PORT = process.env.PORT || 3000;
-const MY_PHONE_NUMBER = '905431436966'; // Ensure this is your actual number
+const MY_PHONE_NUMBER = '905431436966';
 
 let sock = null;
+let pairingCodeRequested = false;
 
 // --- API ROUTES ---
 
+// Health check endpoint
 app.get('/', (req, res) => res.send('WhatsApp Baileys Service Running'));
 
-// This matches the path your Edge function is looking for
+// The endpoint for your Supabase Edge Function
 app.post('/api/send-message', async (req, res) => {
     const { number, message } = req.body;
 
     if (!sock || !sock.authState.creds.registered) {
-        return res.status(503).json({ ok: false, error: 'WhatsApp not connected/paired yet' });
+        return res.status(503).json({ 
+            ok: false, 
+            error: 'WhatsApp not connected/paired yet' 
+        });
     }
 
     try {
+        // Normalize number format for WhatsApp
         const jid = number.includes('@s.whatsapp.net') ? number : `${number}@s.whatsapp.net`;
         await sock.sendMessage(jid, { text: message });
         res.json({ ok: true, status: 'sent', recipient: jid });
     } catch (err) {
+        console.error('Send Error:', err);
         res.status(500).json({ ok: false, error: err.message });
     }
 });
 
-// --- WHATSAPP LOGIC ---
+// --- WHATSAPP CONNECTION LOGIC ---
 
 async function connectToWhatsApp() {
+    console.log('=================================');
+    console.log('Starting WhatsApp Service...');
+    console.log('=================================');
+
     const { state, saveCreds } = await useMultiFileAuthState('auth_info_baileys');
+    const { version } = await fetchLatestBaileysVersion();
+    console.log('Using WA Version:', version);
 
     sock = makeWASocket({
         auth: state,
-        version: [2, 3000, 1015901307],
-        browser: ["Ubuntu", "Chrome", "20.0.04"],
+        version,
+        browser: ['Ubuntu', 'Chrome', '20.0.04'],
+        logger: pino({ level: 'silent' }),
         printQRInTerminal: false,
-        logger: pino({ level: 'info' }),
+        connectTimeoutMs: 60000,
+        defaultQueryTimeoutMs: 0,
+        markOnlineOnConnect: false,
+        syncFullHistory: false,
+        generateHighQualityLinkPreview: false
     });
-
-    // Pairing Code logic
-    if (!sock.authState.creds.registered) {
-        console.log(`>>> Requesting Pairing Code for: ${MY_PHONE_NUMBER}`);
-        setTimeout(async () => {
-            try {
-                const code = await sock.requestPairingCode(MY_PHONE_NUMBER.replace(/\D/g, ''));
-                console.log(`\n=============================================`);
-                console.log(`   YOUR PAIRING CODE: ${code}`);
-                console.log(`=============================================\n`);
-            } catch (err) {
-                console.error("Pairing Request Failed:", err.message);
-            }
-        }, 10000); // 10 second delay for stability
-    }
 
     sock.ev.on('creds.update', saveCreds);
 
-    sock.ev.on('connection.update', (update) => {
+    sock.ev.on('connection.update', async (update) => {
         const { connection, lastDisconnect } = update;
-        
+        console.log('Connection Update:', connection);
+
+        // Request pairing code only when connecting and not registered
+        if (
+            connection === 'connecting' &&
+            !sock.authState.creds.registered &&
+            !pairingCodeRequested
+        ) {
+            try {
+                pairingCodeRequested = true;
+                console.log('\n>>> REQUESTING PAIRING CODE...');
+                
+                await new Promise(resolve => setTimeout(resolve, 7000));
+
+                const code = await sock.requestPairingCode(MY_PHONE_NUMBER);
+                console.log('\n=================================');
+                console.log(`   PAIRING CODE: ${code}`);
+                console.log('=================================\n');
+            } catch (err) {
+                console.error('PAIRING ERROR:', err);
+                pairingCodeRequested = false;
+            }
+        }
+
+        if (connection === 'open') {
+            console.log('--- WHATSAPP CONNECTED ---');
+            pairingCodeRequested = false; 
+        }
+
         if (connection === 'close') {
             const statusCode = lastDisconnect?.error?.output?.statusCode;
-            // Prevent loops if logged out or unauthorized
-            const shouldReconnect = statusCode !== DisconnectReason.loggedOut && statusCode !== 401;
-            console.log('Connection closed. Reconnecting:', shouldReconnect);
-            if (shouldReconnect) connectToWhatsApp();
-        } else if (connection === 'open') {
-            console.log('--- WHATSAPP CONNECTION ACTIVE ---');
+            const shouldReconnect = statusCode !== DisconnectReason.loggedOut;
+            
+            pairingCodeRequested = false;
+
+            if (shouldReconnect) {
+                console.log('Reconnecting in 5 seconds...');
+                setTimeout(connectToWhatsApp, 5000);
+            }
         }
     });
 }
 
-// --- STARTUP SEQUENCE ---
+// --- STARTUP ---
 
-// 1. Start API Server immediately so Railway 502s stop
+// Start API Server FIRST (Crucial for Railway health checks)
 app.listen(PORT, '0.0.0.0', () => {
-    console.log(`>>> API Server listening on port ${PORT}`);
+    console.log(`API Server running on port ${PORT}`);
     
-    // 2. Start WhatsApp connection in the background
-    connectToWhatsApp().catch(err => console.error("Socket Init Error:", err));
+    // Start WhatsApp in background
+    connectToWhatsApp().catch(err => console.error('STARTUP ERROR:', err));
 });

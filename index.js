@@ -17,6 +17,7 @@ process.on('unhandledRejection', (err) => {
 });
 
 const app = express();
+
 app.use(express.json());
 
 const PORT = process.env.PORT || 3000;
@@ -27,6 +28,7 @@ const MY_PHONE_NUMBER = '905431436966';
 let pairingCodeRequested = false;
 
 async function connectToWhatsApp() {
+
     console.log('=================================');
     console.log('Starting WhatsApp Service...');
     console.log('=================================');
@@ -34,7 +36,7 @@ async function connectToWhatsApp() {
     const { state, saveCreds } =
         await useMultiFileAuthState('auth_info_baileys');
 
-    // Always fetch latest compatible version
+    // Get latest supported WhatsApp version
     const { version } = await fetchLatestBaileysVersion();
 
     console.log('Using WA Version:', version);
@@ -44,7 +46,8 @@ async function connectToWhatsApp() {
 
         version,
 
-        browser: ['Chrome', 'Desktop', '1.0.0'],
+        // Most stable browser fingerprint
+        browser: ['Ubuntu', 'Chrome', '20.0.04'],
 
         logger: pino({
             level: 'silent'
@@ -58,12 +61,16 @@ async function connectToWhatsApp() {
 
         markOnlineOnConnect: false,
 
-        syncFullHistory: false
+        syncFullHistory: false,
+
+        generateHighQualityLinkPreview: false
     });
 
+    // Save session automatically
     sock.ev.on('creds.update', saveCreds);
 
     sock.ev.on('connection.update', async (update) => {
+
         const {
             connection,
             lastDisconnect
@@ -71,24 +78,29 @@ async function connectToWhatsApp() {
 
         console.log('Connection Update:', connection);
 
-        // Request pairing code ONLY ONCE
+        // Request pairing code once only
         if (
             connection === 'connecting' &&
             !sock.authState.creds.registered &&
             !pairingCodeRequested
         ) {
             try {
+
                 pairingCodeRequested = true;
 
                 console.log('\n=================================');
                 console.log('REQUESTING PAIRING CODE...');
                 console.log('=================================\n');
 
-                // small delay helps stabilize connection
-                await new Promise(resolve => setTimeout(resolve, 5000));
+                // Give socket time to stabilize
+                await new Promise(resolve =>
+                    setTimeout(resolve, 5000)
+                );
 
                 const code =
-                    await sock.requestPairingCode(MY_PHONE_NUMBER);
+                    await sock.requestPairingCode(
+                        MY_PHONE_NUMBER
+                    );
 
                 console.log('\n=================================');
                 console.log(`PAIRING CODE: ${code}`);
@@ -96,32 +108,47 @@ async function connectToWhatsApp() {
 
                 console.log('Open WhatsApp on your phone:');
                 console.log('Settings > Linked Devices');
-                console.log('Link a Device > Link with phone number');
+                console.log('Link a Device');
+                console.log('Link with phone number instead');
                 console.log('Enter the code immediately.\n');
 
             } catch (err) {
+
                 console.error('PAIRING ERROR:', err);
+
+                pairingCodeRequested = false;
             }
         }
 
+        // Successful connection
         if (connection === 'open') {
+
             console.log('\n=================================');
             console.log('WHATSAPP CONNECTED SUCCESSFULLY');
             console.log('=================================\n');
         }
 
+        // Connection closed
         if (connection === 'close') {
+
+            const statusCode =
+                lastDisconnect?.error?.output?.statusCode;
+
             const shouldReconnect =
-                lastDisconnect?.error?.output?.statusCode !==
-                DisconnectReason.loggedOut;
+                statusCode !== DisconnectReason.loggedOut;
 
             console.log('\n=================================');
             console.log('CONNECTION CLOSED');
+            console.log('Status Code:', statusCode);
             console.log('Reconnect:', shouldReconnect);
             console.log('=================================\n');
 
+            // Reset pairing state
+            pairingCodeRequested = false;
+
             if (shouldReconnect) {
-                pairingCodeRequested = false;
+
+                console.log('Reconnecting in 5 seconds...\n');
 
                 setTimeout(() => {
                     connectToWhatsApp();
@@ -133,16 +160,22 @@ async function connectToWhatsApp() {
     return sock;
 }
 
+// Health check endpoint
 app.get('/', (req, res) => {
     res.send('WhatsApp Baileys Service Running');
 });
 
+// Start service
 connectToWhatsApp()
     .then(() => {
+
         app.listen(PORT, () => {
+
             console.log(`Server running on port ${PORT}`);
         });
+
     })
     .catch((err) => {
+
         console.error('FAILED TO START:', err);
     });

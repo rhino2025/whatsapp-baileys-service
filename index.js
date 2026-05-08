@@ -165,17 +165,14 @@ app.get('/', (req, res) => {
     res.send('WhatsApp Baileys Service Running');
 });
 
-// Start service
-connectToWhatsApp()
-    .then(() => {
+// 1. Start the Express server IMMEDIATELY
+// This tells Railway: "I am alive and listening!"
+app.listen(PORT, '0.0.0.0', () => {
+    console.log(`>>> API Server is LIVE on port ${PORT}`);
+});
 
-        app.listen(PORT, () => {
-
-            console.log(`Server running on port ${PORT}`);
-        });
-
-    })
-    .catch((err) => {
-
-        console.error('FAILED TO START:', err);
-    });
+// 2. Start the WhatsApp logic separately
+// If this fails or waits for a code, the API server stays up.
+connectToWhatsApp().catch((err) => {
+    console.error('CRITICAL: WhatsApp Connection Logic Failed:', err);
+});

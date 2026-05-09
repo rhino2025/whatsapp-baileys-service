@@ -7,19 +7,13 @@ const {
 const express = require('express');
 const pino = require('pino');
 const axios = require('axios');
-
-// ================================
-// GLOBAL ERROR HANDLING
-// ================================
-process.on('uncaughtException', (err) => console.error('UNCAUGHT EXCEPTION:', err));
-process.on('unhandledRejection', (err) => console.error('UNHANDLED REJECTION:', err));
+const fs = require('fs');
 
 const app = express();
 app.use(express.json());
 
 // --- CONFIGURATION ---
 const PORT = process.env.PORT || 3000;
-// UPDATED: Now defaults to your Turkish number
 const MY_PHONE_NUMBER = process.env.MY_PHONE_NUMBER || '905431436966';
 const LOVABLE_WEBHOOK_URL = 'https://azzyfkdywswhfaqbguev.supabase.co/functions/v1/whatsapp-webhook';
 
@@ -29,45 +23,47 @@ const WHATSAPP_WEBHOOK_API_KEY = process.env.WHATSAPP_WEBHOOK_API_KEY;
 let sock = null;
 let pairingCodeRequested = false;
 
-// ================================
-// API ROUTES
-// ================================
+// --- SESSION CLEANUP (If requested via Railway Variable) ---
+if (process.env.RESET_SESSION) {
+    console.log('Reset trigger detected. Wiping local session...');
+    if (fs.existsSync('./auth_info_baileys')) {
+        fs.rmSync('./auth_info_baileys', { recursive: true, force: true });
+    }
+}
 
-app.get('/', (req, res) => res.send('WhatsApp Service Online'));
-
-// --- OUTBOUND: LOVABLE -> RAILWAY ---
+// --- OUTBOUND: LOVABLE -> RAILWAY (Dashboard to Guest) ---
 app.post('/api/send-message', async (req, res) => {
     const clientKey = req.headers['x-api-key'] || req.headers['authorization']?.replace('Bearer ', '');
     
-    console.log('--- Outbound Security Check ---');
-    console.log(`Received key starts with: "${clientKey?.substring(0, 5)}..."`);
-    console.log(`Expected key starts with: "${API_KEY?.substring(0, 5)}..."`);
-
     if (clientKey !== API_KEY) {
-        console.error('❌ UNAUTHORIZED: API Key mismatch.');
-        return res.status(401).json({ ok: false, error: 'Unauthorized' });
+        console.error('❌ Unauthorized send attempt');
+        return res.status(401).json({ error: 'Unauthorized' });
     }
 
     const { number, message } = req.body;
     if (!number || !message) return res.status(400).json({ error: 'Missing data' });
 
     try {
-        const cleanNumber = number.replace(/\D/g, '').replace(/^0/, '90');
-        const jid = cleanNumber.includes('@s.whatsapp.net') ? cleanNumber : `${cleanNumber}@s.whatsapp.net`;
+        let jid;
+        // If it's a 14-digit LID (starts with 1), use it directly
+        if (number.startsWith('1') && number.length > 12) {
+            jid = `${number}@s.whatsapp.net`;
+        } else {
+            // Standardize real phone numbers
+            const cleanNumber = number.replace(/\D/g, '').replace(/^0/, '90');
+            jid = `${cleanNumber}@s.whatsapp.net`;
+        }
 
         await sock.sendMessage(jid, { text: message });
-        console.log(`📤 Message Sent to ${cleanNumber}`);
+        console.log(`📤 Message Sent to ${jid}`);
         res.json({ ok: true });
     } catch (err) {
-        console.error('❌ Send Error:', err.message);
+        console.error('❌ Outbound Error:', err.message);
         res.status(500).json({ error: err.message });
     }
 });
 
-// ================================
-// WHATSAPP CONNECTION
-// ================================
-
+// --- WHATSAPP CONNECTION ---
 async function connectToWhatsApp() {
     const { state, saveCreds } = await useMultiFileAuthState('auth_info_baileys');
     const { version } = await fetchLatestBaileysVersion();
@@ -82,23 +78,38 @@ async function connectToWhatsApp() {
 
     sock.ev.on('creds.update', saveCreds);
 
-    // --- INBOUND: WHATSAPP -> RAILWAY -> SUPABASE ---
+    // --- INBOUND: WHATSAPP -> RAILWAY -> LOVABLE ---
     sock.ev.on('messages.upsert', async ({ messages, type }) => {
         try {
             if (type !== 'notify') return;
             const msg = messages[0];
             if (!msg.message || msg.key.fromMe) return;
 
-            let sender = msg.key.remoteJid.split('@')[0];
-            if (msg.key.participant) {
-                sender = msg.key.participant.split('@')[0];
+            // 1. Get the Primary ID (often the 1469... LID)
+            let senderId = msg.key.remoteJid.split('@')[0];
+            let realPhone = null;
+
+            // 2. Try to unmask the real phone number from JID variants
+            if (msg.key.remoteJid.includes(':')) {
+                // Extracts digits before the colon (e.g., 447847...:1@s.whatsapp.net)
+                realPhone = msg.key.remoteJid.split(':')[0];
             }
 
-            const text = msg.message?.conversation || msg.message?.extendedTextMessage?.text || 'Media Message';
-            console.log(`📩 Incoming from ${sender}: ${text}`);
+            // 3. Fallback check on participant (for multi-device setups)
+            if (msg.key.participant) {
+                const part = msg.key.participant.split('@')[0];
+                if (!part.startsWith('1')) realPhone = part;
+            }
+
+            // Use realPhone if found, otherwise use the senderId (LID)
+            const finalDisplayNumber = realPhone || senderId;
+
+            const text = msg.message?.conversation || msg.message?.extendedTextMessage?.text || 'Media/Unsupported';
+            console.log(`📩 Incoming from ${finalDisplayNumber} (LID: ${senderId}): ${text}`);
 
             await axios.post(LOVABLE_WEBHOOK_URL, {
-                number: sender,
+                number: finalDisplayNumber, // The dashboard will show this
+                raw_lid: senderId,          // The dashboard will use this to reply
                 message: text,
                 timestamp: Date.now(),
                 direction: 'incoming'
@@ -109,30 +120,22 @@ async function connectToWhatsApp() {
                     'Authorization': `Bearer ${WHATSAPP_WEBHOOK_API_KEY}`
                 }
             });
-
-            console.log('✅ Webhook Delivered');
         } catch (err) {
-            console.error('❌ Webhook Failed:', err.response?.data || err.message);
+            console.error('❌ Inbound Webhook Error:', err.message);
         }
     });
 
-    sock.ev.on('connection.update', async (update) => {
+    sock.ev.on('connection.update', (update) => {
         const { connection, lastDisconnect } = update;
         
-        if (connection === 'connecting') {
-            if (!sock.authState.creds.registered && !pairingCodeRequested) {
-                pairingCodeRequested = true;
-                setTimeout(async () => {
-                    try {
-                        console.log(`--- GENERATING PAIRING CODE FOR ${MY_PHONE_NUMBER} ---`);
-                        const code = await sock.requestPairingCode(MY_PHONE_NUMBER.replace(/\D/g, ''));
-                        console.log(`\n🔗 YOUR ACTIVE PAIRING CODE: ${code}\n`);
-                    } catch (e) { 
-                        console.error('Pairing Request Failed:', e.message);
-                        pairingCodeRequested = false; 
-                    }
-                }, 5000);
-            }
+        if (connection === 'connecting' && !sock.authState.creds.registered && !pairingCodeRequested) {
+            pairingCodeRequested = true;
+            setTimeout(async () => {
+                try {
+                    const code = await sock.requestPairingCode(MY_PHONE_NUMBER.replace(/\D/g, ''));
+                    console.log(`\n🔗 PAIRING CODE: ${code}\n`);
+                } catch (e) { pairingCodeRequested = false; }
+            }, 6000);
         }
 
         if (connection === 'open') {

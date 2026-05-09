@@ -19,10 +19,10 @@ app.use(express.json());
 
 // --- CONFIGURATION ---
 const PORT = process.env.PORT || 3000;
+// UPDATED: Now defaults to your Turkish number
 const MY_PHONE_NUMBER = process.env.MY_PHONE_NUMBER || '905431436966';
 const LOVABLE_WEBHOOK_URL = 'https://azzyfkdywswhfaqbguev.supabase.co/functions/v1/whatsapp-webhook';
 
-// Keys from Railway Variables
 const API_KEY = process.env.API_KEY; 
 const WHATSAPP_WEBHOOK_API_KEY = process.env.WHATSAPP_WEBHOOK_API_KEY;
 
@@ -35,9 +35,8 @@ let pairingCodeRequested = false;
 
 app.get('/', (req, res) => res.send('WhatsApp Service Online'));
 
-// --- OUTBOUND: LOVABLE -> RAILWAY (Dashboard sending a message) ---
+// --- OUTBOUND: LOVABLE -> RAILWAY ---
 app.post('/api/send-message', async (req, res) => {
-    // Extract key from either header style
     const clientKey = req.headers['x-api-key'] || req.headers['authorization']?.replace('Bearer ', '');
     
     console.log('--- Outbound Security Check ---');
@@ -53,7 +52,7 @@ app.post('/api/send-message', async (req, res) => {
     if (!number || !message) return res.status(400).json({ error: 'Missing data' });
 
     try {
-        const cleanNumber = number.replace(/\D/g, '').replace(/^0/, '44');
+        const cleanNumber = number.replace(/\D/g, '').replace(/^0/, '90');
         const jid = cleanNumber.includes('@s.whatsapp.net') ? cleanNumber : `${cleanNumber}@s.whatsapp.net`;
 
         await sock.sendMessage(jid, { text: message });
@@ -90,7 +89,6 @@ async function connectToWhatsApp() {
             const msg = messages[0];
             if (!msg.message || msg.key.fromMe) return;
 
-            // FIX: Prioritize real sender number over LID aliases (1469... issue)
             let sender = msg.key.remoteJid.split('@')[0];
             if (msg.key.participant) {
                 sender = msg.key.participant.split('@')[0];
@@ -99,8 +97,7 @@ async function connectToWhatsApp() {
             const text = msg.message?.conversation || msg.message?.extendedTextMessage?.text || 'Media Message';
             console.log(`📩 Incoming from ${sender}: ${text}`);
 
-            // Forward to Supabase
-            const response = await axios.post(LOVABLE_WEBHOOK_URL, {
+            await axios.post(LOVABLE_WEBHOOK_URL, {
                 number: sender,
                 message: text,
                 timestamp: Date.now(),
@@ -113,34 +110,28 @@ async function connectToWhatsApp() {
                 }
             });
 
-            console.log('✅ Webhook Delivered:', response.data.id || 'Success');
+            console.log('✅ Webhook Delivered');
         } catch (err) {
             console.error('❌ Webhook Failed:', err.response?.data || err.message);
         }
     });
 
-    // --- CONNECTION & PAIRING LOGIC ---
     sock.ev.on('connection.update', async (update) => {
         const { connection, lastDisconnect } = update;
         
         if (connection === 'connecting') {
-            console.log('Attempting to connect...');
             if (!sock.authState.creds.registered && !pairingCodeRequested) {
                 pairingCodeRequested = true;
-                
-                // Clear any potential stale state before requesting
                 setTimeout(async () => {
                     try {
-                        console.log('--- GENERATING NEW PAIRING CODE ---');
-                        // Use digits only version of number
-                        const cleanPairNumber = MY_PHONE_NUMBER.replace(/\D/g, '');
-                        const code = await sock.requestPairingCode(cleanPairNumber);
+                        console.log(`--- GENERATING PAIRING CODE FOR ${MY_PHONE_NUMBER} ---`);
+                        const code = await sock.requestPairingCode(MY_PHONE_NUMBER.replace(/\D/g, ''));
                         console.log(`\n🔗 YOUR ACTIVE PAIRING CODE: ${code}\n`);
                     } catch (e) { 
                         console.error('Pairing Request Failed:', e.message);
                         pairingCodeRequested = false; 
                     }
-                }, 4000);
+                }, 5000);
             }
         }
 
@@ -151,9 +142,7 @@ async function connectToWhatsApp() {
 
         if (connection === 'close') {
             const statusCode = lastDisconnect?.error?.output?.statusCode;
-            console.log(`Connection closed (Status: ${statusCode})`);
             pairingCodeRequested = false;
-            
             if (statusCode !== DisconnectReason.loggedOut) {
                 setTimeout(connectToWhatsApp, 5000);
             }
